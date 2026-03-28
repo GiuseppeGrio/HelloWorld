@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Il Labirinto degli Enigmi - Three.js</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { overflow: hidden; font-family: 'Arial', sans-serif; }
+        #game-container { position: relative; width: 100vw; height: 100vh; }
+        #ui {
+            position: absolute; top: 20px; left: 20px; color: white;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8); z-index: 100;
+            background: rgba(0,0,0,0.5); padding: 15px; border-radius: 10px;
+        }
+        #message {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: white; font-size: 32px; text-align: center;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8); z-index: 100;
+            background: rgba(0,0,0,0.7); padding: 30px; border-radius: 15px;
+            display: none;
+        }
+        .instructions {
+            position: absolute; bottom: 20px; left: 20px; color: white;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.8); z-index: 100;
+            background: rgba(0,0,0,0.5); padding: 10px; border-radius: 8px;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <div id="ui">
+            <h2>🎮 Il Labirinto degli Enigmi</h2>
+            <p>Chiave: <span id="key-status">❌ Non raccolta</span></p>
+            <p>Porta: <span id="door-status">🔒 Chiusa</span></p>
+        </div>
+        <div id="message"></div>
+        <div class="instructions">
+            <p>WASD o Frecce: Muovi il personaggio</p>
+            <p>Raccogli la chiave 🔑 e apri la porta rossa 🚪 per vincere!</p>
+        </div>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // Configurazione gioco
+        const CELL_SIZE = 4;
+        const WALL_HEIGHT = 6;
+        const PLAYER_SPEED = 0.15;
+        
+        // Mappa del labirinto (1=muro, 0=percorso, K=chiave, D=porta, G=traguardo)
+        const mazeMap = [
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+            [1, 0, 1, 0, 1, 0, 1, 1, 0, 1],
+            [1, 0, 1, 0, 0, 0, 0, 1, 0, 1],
+            [1, 0, 1, 1, 1, 1, 0, 1, 0, 1],
+            [1, 0, 0, 0, 0, 1, 0, 0, 0, 1],
+            [1, 1, 1, 1, 0, 1, 1, 1, 0, 1],
+            [1, 0, 0, 1, 0, 0, 0, 1, 0, 1],
+            [1, 0, 0, 0, 0, 1, 0, 0, 'G', 1],
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+        ];
+
+        // Stato del gioco
+        let hasKey = false;
+        let doorOpen = false;
+        let gameWon = false;
+        let keyPosition = { x: 7, z: 7 };
+        let doorPosition = { x: 4, z: 5 };
+        let goalPosition = { x: 8, z: 8 };
+
+        // Setup scena
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB);
+        scene.fog = new THREE.Fog(0x87CEEB, 20, 50);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.getElementById('game-container').appendChild(renderer.domElement);
+
+        // Luci
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(20, 30, 20);
+        directionalLight.castShadow = true;
+        directionalLight.shadow.mapSize.width = 2048;
+        directionalLight.shadow.mapSize.height = 2048;
+        scene.add(directionalLight);
+
+        // Pavimento
+        const floorGeometry = new THREE.PlaneGeometry(100, 100);
+        const floorMaterial = new THREE.MeshStandardMaterial({ 
+            color: 0x3d5c3d,
+            roughness: 0.8 
+        });
+        const floor = new THREE.Mesh(floorGeometry, floorMaterial);
+        floor.rotation.x = -Math.PI / 2;
+        floor.receiveShadow = true;
+        scene.add(floor);
+
+        // Gruppo muri
+        const walls = [];
+        const wallGeometry = new THREE.BoxGeometry(CELL_SIZE, WALL_HEIGHT, CELL_SIZE);
+        const wallMaterial = new THREE.MeshStandardMaterial({ color: 0x8B4513 });
+
+        function createWall(x, z) {
+            const wall = new THREE.Mesh(wallGeometry, wallMaterial);
+            wall.position.set(x * CELL_SIZE, WALL_HEIGHT / 2, z * CELL_SIZE);
+            wall.castShadow = true;
+            wall.receiveShadow = true;
+            scene.add(wall);
+            walls.push(wall);
+        }
+
+        // Crea labirinto
+        for (let z = 0; z < mazeMap.length; z++) {
+            for (let x = 0; x < mazeMap[z].length; x++) {
+                if (mazeMap[z][x] === 1) {
+                    createWall(x, z);
+                }
+            }
+        }
+
+        // Porta enigma
+        const doorGeometry = new THREE.BoxGeometry(CELL_SIZE, WALL_HEIGHT, CELL_SIZE * 0.3);
+        const doorMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000, emissive: 0x330000 });
+        const door = new THREE.Mesh(doorGeometry, doorMaterial);
+        door.position.set(doorPosition.x * CELL_SIZE, WALL_HEIGHT / 2, doorPosition.z * CELL_SIZE);
+        door.castShadow = true;
+        scene.add(door);
+
+        // Chiave
+        const keyGroup = new THREE.Group();
+        const keyBaseGeometry = new THREE.TorusGeometry(0.5, 0.15, 8, 16);
+        const keyBladeGeometry = new THREE.BoxGeometry(0.3, 0.1, 1.2);
+        const keyMaterial = new THREE.MeshStandardMaterial({ 
+            color: 0xFFD700, 
+            metalness: 0.8, 
+            roughness: 0.2,
+            emissive: 0x333300
+        });
+        
+        const keyRing = new THREE.Mesh(keyBaseGeometry, keyMaterial);
+        const keyBlade = new THREE.Mesh(keyBladeGeometry, keyMaterial);
+        keyBlade.position.z = 0.6;
+        keyGroup.add(keyRing, keyBlade);
+        keyGroup.position.set(keyPosition.x * CELL_SIZE, 1.5, keyPosition.z * CELL_SIZE);
+        keyGroup.rotation.x = Math.PI / 2;
+        scene.add(keyGroup);
+
+        // Traguardo
+        const goalGeometry = new THREE.CylinderGeometry(1, 1, 0.5, 16);
+        const goalMaterial = new THREE.MeshStandardMaterial({ 
+            color: 0x00ff00, 
+            emissive: 0x003300,
+            transparent: true,
+            opacity: 0.8
+        });
+        const goal = new THREE.Mesh(goalGeometry, goalMaterial);
+        goal.position.set(goalPosition.x * CELL_SIZE, 0.25, goalPosition.z * CELL_SIZE);
+        scene.add(goal);
+
+        // Particelle traguardo
+        const particlesGeometry = new THREE.BufferGeometry();
+        const particleCount = 50;
+        const positions = new Float32Array(particleCount * 3);
+        for (let i = 0; i < particleCount; i++) {
+            positions[i * 3] = (Math.random() - 0.5) * 3;
+            positions[i * 3 + 1] = Math.random() * 2;
+            positions[i * 3 + 2] = (Math.random() - 0.5) * 3;
+        }
+        particlesGeometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        const particlesMaterial = new THREE.PointsMaterial({ color: 0x00ff00, size: 0.1 });
+        const particles = new THREE.Points(particlesGeometry, particlesMaterial);
+        goal.add(particles);
+
+        // Giocatore (bambino con capelli blu lunghissimi)
+        const playerGroup = new THREE.Group();
+        
+        // Corpo
+        const bodyGeometry = new THREE.CylinderGeometry(0.4, 0.5, 1.2, 8);
+        const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0xffdbac });
+        const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+        body.position.y = 0.6;
+        playerGroup.add(body);
+
+        // Testa
+        const headGeometry = new THREE.SphereGeometry(0.4, 16, 16);
+        const head = new THREE.Mesh(headGeometry, bodyMaterial);
+        head.position.y = 1.4;
+        playerGroup.add(head);
+
+        // Capelli blu lunghissimi (tre strati per volume)
+        const hairMaterial = new THREE.MeshStandardMaterial({ 
+            color: 0x00008B, 
+            roughness: 0.4 
+        });
+
+        // Strato principale capelli lunghi fino ai piedi
+        const hairMainGeometry = new THREE.CylinderGeometry(0.45, 0.5, 2.5, 16);
+        const hairMain = new THREE.Mesh(hairMainGeometry, hairMaterial);
+        hairMain.position.y = 1.0;
+        playerGroup.add(hairMain);
+
+        // Strato posteriore più lungo
+        const hairBackGeometry = new THREE.BoxGeometry(0.7, 2.8, 0.4);
+        const hairBack = new THREE.Mesh(hairBackGeometry, hairMaterial);
+        hairBack.position.set(0, 0.8, -0.2);
+        playerGroup.add(hairBack);
+
+        // Ciuffo laterale
+        const hairSideGeometry = new THREE.BoxGeometry(0.3, 2.2, 0.3);
+        const hairLeft = new THREE.Mesh(hairSideGeometry, hairMaterial);
+        hairLeft.position.set(-0.35, 0.9, 0.1);
+        hairLeft.rotation.z = 0.1;
+        playerGroup.add(hairLeft);
+
+        const hairRight = new THREE.Mesh(hairSideGeometry, hairMaterial);
+        hairRight.position.set(0.35, 0.9, 0.1);
+        hairRight.rotation.z = -0.1;
+        playerGroup.add(hairRight);
+
+        playerGroup.position.set(1 * CELL_SIZE, 0, 1 * CELL_SIZE);
+        playerGroup.castShadow = true;
+        scene.add(playerGroup);
+
+        // Controlli
+        const keys = { w: false, a: false, s: false, d: false };
+        
+        document.addEventListener('keydown', (e) => {
+            const key = e.key.toLowerCase();
+            if (keys.hasOwnProperty(key) || key === 'arrowup' || key === 'arrowleft' || key === 'arrowdown' || key === 'arrowright') {
+                if (key === 'w' || key === 'arrowup') keys.w = true;
+                if (key === 'a' || key === 'arrowleft') keys.a = true;
+                if (key === 's' || key === 'arrowdown') keys.s = true;
+                if (key === 'd' || key === 'arrowright') keys.d = true;
+            }
+        });
+
+        document.addEventListener('keyup', (e) => {
+            const key = e.key.toLowerCase();
+            if (key === 'w' || key === 'arrowup') keys.w = false;
+            if (key === 'a' || key === 'arrowleft') keys.a = false;
+            if (key === 's' || key === 'arrowdown') keys.s = false;
+            if (key === 'd' || key === 'arrowright') keys.d = false;
+        });
+
+        // Collisioni
+        function checkCollision(newX, newZ) {
+            const gridX = Math.round(newX / CELL_SIZE);
+            const gridZ = Math.round(newZ / CELL_SIZE);
+            
+            if (gridZ < 0 || gridZ >= mazeMap.length || gridX < 0 || gridX >= mazeMap[0].length) {
+                return true;
+            }
+            
+            if (mazeMap[gridZ][gridX] === 1) {
+                return true;
+            }
+            
+            // Collisione con porta se chiusa
+            if (!doorOpen && Math.abs(gridX - doorPosition.x) < 0.5 && Math.abs(gridZ - doorPosition.z) < 0.5) {
+                return true;
+            }
+            
+            return false;
+        }
+
+        // Aggiorna UI
+        function updateUI() {
+            document.getElementById('key-status').textContent = hasKey ? '✅ Raccolta' : '❌ Non raccolta';
+            document.getElementById('key-status').style.color = hasKey ? '#00ff00' : '#ff0000';
+            document.getElementById('door-status').textContent = doorOpen ? '🔓 Aperta' : '🔒 Chiusa';
+            document.getElementById('door-status').style.color = doorOpen ? '#00ff00' : '#ff0000';
+        }
+
+        // Mostra messaggio
+        function showMessage(text, duration = 3000) {
+            const msgEl = document.getElementById('message');
+            msgEl.textContent = text;
+            msgEl.style.display = 'block';
+            setTimeout(() => {
+                msgEl.style.display = 'none';
+            }, duration);
+        }
+
+        // Loop di gioco
+        let time = 0;
+        function animate() {
+            requestAnimationFrame(animate);
+            time += 0.02;
+
+            if (!gameWon) {
+                // Movimento giocatore
+                let dx = 0, dz = 0;
+                if (keys.w) dz = -PLAYER_SPEED * CELL_SIZE;
+                if (keys.s) dz = PLAYER_SPEED * CELL_SIZE;
+                if (keys.a) dx = -PLAYER_SPEED * CELL_SIZE;
+                if (keys.d) dx = PLAYER_SPEED * CELL_SIZE;
+
+                const newX = playerGroup.position.x + dx;
+                const newZ = playerGroup.position.z + dz;
+
+                if (!checkCollision(newX, playerGroup.position.z)) {
+                    playerGroup.position.x = newX;
+                }
+                if (!checkCollision(playerGroup.position.x, newZ)) {
+                    playerGroup.position.z = newZ;
+                }
+
+                // Rotazione in base al movimento
+                if (dx !== 0 || dz !== 0) {
+                    const targetRotation = Math.atan2(dx, dz);
+                    playerGroup.rotation.y = targetRotation;
+                }
+
+                // Animazione chiave
+                keyGroup.rotation.y += 0.03;
+                keyGroup.position.y = 1.5 + Math.sin(time * 2) * 0.2;
+
+                // Animazione particelle traguardo
+                particles.rotation.y += 0.02;
+
+                // Controllo raccolta chiave
+                if (!hasKey) {
+                    const distToKey = playerGroup.position.distanceTo(keyGroup.position);
+                    if (distToKey < 1.5) {
+                        hasKey = true;
+                        scene.remove(keyGroup);
+                        updateUI();
+                        showMessage('🔑 Hai raccolto la chiave!', 2000);
+                    }
+                }
+
+                // Controllo porta
+                if (hasKey && !doorOpen) {
+                    const distToDoor = playerGroup.position.distanceTo(door.position);
+                    if (distToDoor < 2.5) {
+                        doorOpen = true;
+                        door.material.color.setHex(0x00ff00);
+                        door.material.emissive.setHex(0x003300);
+                        updateUI();
+                        showMessage('🚪 Porta aperta!', 2000);
+                    }
+                }
+
+                // Controllo vittoria
+                const distToGoal = playerGroup.position.distanceTo(goal.position);
+                if (distToGoal < 1.5) {
+                    gameWon = true;
+                    showMessage('🎉 VITTORIA! Hai completato il labirinto!', 5000);
+                }
+            }
+
+            // Camera segue il giocatore
+            const cameraOffset = new THREE.Vector3(0, 12, 12);
+            const targetPos = playerGroup.position.clone().add(cameraOffset);
+            camera.position.lerp(targetPos, 0.1);
+            camera.lookAt(playerGroup.position);
+
+            renderer.render(scene, camera);
+        }
+
+        // Resize handler
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Avvio
+        updateUI();
+        animate();
+    </script>
+</body>
+</html>
